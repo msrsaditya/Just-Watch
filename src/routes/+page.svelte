@@ -316,7 +316,6 @@
 				searchError = 'No results found.';
 				searchResults = [];
 			} else {
-				// Deduplicate before adding to buffer
 				const existingIds = new Set(searchBuffer.map((i) => i.id));
 				const uniqueNew = newItems.filter((i) => !existingIds.has(i.id));
 
