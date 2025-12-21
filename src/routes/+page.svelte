@@ -41,6 +41,12 @@
 		inTheaters?: boolean;
 		sources: GroupedSource[];
 		overview: string;
+		digitalRelease?: string;
+		theatricalRelease?: string;
+		isDigitalReleased?: boolean;
+		isTheatricalReleased?: boolean;
+		showReleaseInfo?: boolean;
+		statusReason?: string;
 	}
 	interface WatchmodeItem {
 		name: string;
@@ -61,6 +67,18 @@
 		provider_id: number;
 		provider_name: string;
 		logo_path: string;
+	}
+	interface TMDBReleaseDate {
+		certification: string;
+		descriptors: string[];
+		iso_639_1: string;
+		note: string;
+		release_date: string;
+		type: number;
+	}
+	interface TMDBReleaseResult {
+		iso_3166_1: string;
+		release_dates: TMDBReleaseDate[];
 	}
 	let region = 'US';
 	let query = '';
@@ -318,10 +336,8 @@
 			} else {
 				const existingIds = new Set(searchBuffer.map((i) => i.id));
 				const uniqueNew = newItems.filter((i) => !existingIds.has(i.id));
-
 				searchBuffer = [...searchBuffer, ...uniqueNew];
 				if (page === 1) searchCache[query] = searchBuffer;
-
 				const currentCount = searchResults.length;
 				const nextBatchSize = currentCount + 10;
 				searchResults = searchBuffer.slice(
@@ -367,10 +383,50 @@
 			overview: movie.overview || 'No description available.',
 			sources: [],
 			inTheaters: false,
-			year: movie.release_date?.split('-')[0] || movie.first_air_date?.split('-')[0]
+			year: movie.release_date?.split('-')[0] || movie.first_air_date?.split('-')[0],
+			digitalRelease: 'N/A',
+			theatricalRelease: 'N/A',
+			isDigitalReleased: false,
+			isTheatricalReleased: false,
+			showReleaseInfo: true,
+			statusReason: ''
 		} as Movie;
 		try {
+			let theatricalTimestamp = 0;
+			let digitalTimestamp = 0;
 			if (movie.media_type === 'movie') {
+				if (movie.release_date) {
+					theatricalTimestamp = Date.parse(movie.release_date);
+					selectedMovie.theatricalRelease = new Intl.DateTimeFormat(undefined, {
+						year: 'numeric',
+						month: 'long',
+						day: 'numeric'
+					}).format(theatricalTimestamp);
+				}
+				try {
+					const releaseUrl = `https://api.themoviedb.org/3/movie/${movie.id}/release_dates?api_key=${TMDB_KEY}`;
+					const releaseRes = await axios.get(releaseUrl);
+					const results = releaseRes.data.results as TMDBReleaseResult[];
+					const regionRules =
+						results.find((r) => r.iso_3166_1 === region) ||
+						results.find((r) => r.iso_3166_1 === 'US');
+					if (regionRules) {
+						const digitalDates = regionRules.release_dates
+							.filter((d) => d.type === 4 || d.type === 5)
+							.sort((a, b) => Date.parse(a.release_date) - Date.parse(b.release_date));
+						if (digitalDates.length > 0) {
+							const earliest = digitalDates[0];
+							digitalTimestamp = Date.parse(earliest.release_date);
+							selectedMovie.digitalRelease = new Intl.DateTimeFormat(undefined, {
+								year: 'numeric',
+								month: 'long',
+								day: 'numeric'
+							}).format(digitalTimestamp);
+						}
+					}
+				} catch {
+					/* ignore */
+				}
 				const nowPlayingUrl = `https://api.themoviedb.org/3/movie/now_playing?api_key=${TMDB_KEY}&region=${region}`;
 				const res = await axios.get(nowPlayingUrl);
 				if (selectedMovie) {
@@ -378,12 +434,39 @@
 						(m) => m.id === movie.id
 					);
 				}
+			} else {
+				if (movie.first_air_date) {
+					theatricalTimestamp = Date.parse(movie.first_air_date);
+					selectedMovie.theatricalRelease = new Intl.DateTimeFormat(undefined, {
+						year: 'numeric',
+						month: 'long',
+						day: 'numeric'
+					}).format(theatricalTimestamp);
+					selectedMovie.digitalRelease = 'Check Episode Guide';
+					digitalTimestamp = theatricalTimestamp;
+				}
+			}
+			const now = Date.now();
+			selectedMovie.isTheatricalReleased = theatricalTimestamp > 0 && now >= theatricalTimestamp;
+			selectedMovie.isDigitalReleased = digitalTimestamp > 0 && now >= digitalTimestamp;
+			if (!selectedMovie.isTheatricalReleased && !selectedMovie.isDigitalReleased) {
+				selectedMovie.statusReason = '(probably because the movie is not yet released)';
+			} else if (selectedMovie.isTheatricalReleased && selectedMovie.isDigitalReleased) {
+				selectedMovie.statusReason =
+					'(probably because our data is old - please check back in 24 hours again)';
+			} else if (selectedMovie.isTheatricalReleased && !selectedMovie.isDigitalReleased) {
+				selectedMovie.statusReason =
+					"(probably because it isn't released digitally yet and it isn't playing in any theaters in your country)";
+			} else {
+				selectedMovie.statusReason = '(check release dates above)';
 			}
 			let rawSources = await fetchFromWatchmode(movie, 'id');
 			if (rawSources.length === 0) rawSources = await fetchFromWatchmode(movie, 'name');
 			if (rawSources.length === 0) rawSources = await fetchFromRapidAPI(movie);
 			if (selectedMovie) {
 				selectedMovie.sources = groupSources(rawSources);
+				const hasSources = selectedMovie.sources.length > 0;
+				selectedMovie.showReleaseInfo = !hasSources || !selectedMovie.isDigitalReleased;
 				activeTab = 'all';
 				movieCache[cacheKey] = selectedMovie;
 			}
@@ -531,7 +614,8 @@
 		const img = e.target as HTMLImageElement;
 		img.style.display = 'none';
 		if (img.parentElement) {
-			img.parentElement.querySelector('.fallback-text')?.classList.remove('hidden');
+			const textSpan = img.parentElement.querySelector('.fallback-text');
+			if (textSpan) textSpan.classList.remove('hidden');
 		}
 	}
 </script>
@@ -783,6 +867,42 @@
 					</button>
 				</div>
 				<div class="space-y-3">
+					{#if selectedMovie.showReleaseInfo}
+						<div class="rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 shadow-lg">
+							<div class="mb-4 flex items-center gap-2">
+								<svg
+									class="h-5 w-5 text-blue-400"
+									fill="none"
+									viewBox="0 0 24 24"
+									stroke="currentColor"
+								>
+									<path
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										stroke-width="2"
+										d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
+									/>
+								</svg>
+								<span class="text-sm font-bold tracking-wider text-neutral-400 uppercase"
+									>Release Information</span
+								>
+							</div>
+							<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+								<div
+									class={`rounded-lg p-4 ${selectedMovie.isTheatricalReleased ? 'border border-green-800 bg-green-900/20 text-green-200' : 'border border-red-800 bg-red-900/20 text-red-200'}`}
+								>
+									<div class="mb-1 text-xs opacity-70">Theatrical Release</div>
+									<div class="text-lg font-bold">{selectedMovie.theatricalRelease}</div>
+								</div>
+								<div
+									class={`rounded-lg p-4 ${selectedMovie.isDigitalReleased ? 'border border-green-800 bg-green-900/20 text-green-200' : 'border border-red-800 bg-red-900/20 text-red-200'}`}
+								>
+									<div class="mb-1 text-xs opacity-70">Digital Release</div>
+									<div class="text-lg font-bold">{selectedMovie.digitalRelease}</div>
+								</div>
+							</div>
+						</div>
+					{/if}
 					{#if selectedMovie.inTheaters && (activeTab === 'all' || activeTab === 'paid')}
 						<div
 							class="flex items-center gap-4 rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-4"
@@ -867,7 +987,12 @@
 					{#if !selectedMovie.sources.some( (s) => (activeTab === 'all' ? true : activeTab === 'free' ? s.options.some((o) => o.type === 'free') : s.options.some((o) => o.type !== 'free')) ) && !(selectedMovie.inTheaters && activeTab !== 'free')}
 						<div class="rounded-xl border border-dashed border-neutral-800 py-12 text-center">
 							<p class="text-neutral-500">
-								No {activeTab} options found in {countryMap.find((c) => c.code === region)?.name}.
+								No {activeTab === 'all' ? '' : activeTab} options found in {countryMap.find(
+									(c) => c.code === region
+								)?.name}
+								<br />
+								<span class="mt-1 block text-xs text-neutral-600">{selectedMovie.statusReason}</span
+								>
 							</p>
 						</div>
 					{/if}
